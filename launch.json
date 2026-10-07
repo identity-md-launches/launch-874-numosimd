@@ -1,0 +1,20 @@
+{
+  "kind": "custom_token",
+  "token": {
+    "contract": "NumosIMD",
+    "name": "NumosIMD",
+    "symbol": "NUMOS",
+    "decimals": 18,
+    "constructorArgs": [],
+    "totalSupply": "1000000000000000000000000000"
+  },
+  "contracts": [],
+  "pool": {
+    "pairedCurrency": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "initialPrice": "125270724187523965593206900"
+  },
+  "economics": {"poolBps":8800,"initialMarketCapWei":"2500000000000000000000","remainderTo":"0xd6302976e590b9b947da8774b7f1246164e0ce98"},
+  "notes": "NumosIMD in src/NumosIMD.sol is an ERC-20 with 18 decimals. Its argument-free constructor mints 1,000,000,000 NUMOS (10^27 minor units) once to msg.sender, the factory during launch. Transfers have no tax or burn; there are no exposed mint, burn, owner, pause, blacklist, seizure, or upgrade functions. No application contracts or initialization calls are required. The selected pool fee is 0.3% with tick spacing 60. initialPrice is provenance only: floor(sqrt(economics.initialMarketCapWei / token.totalSupply) * 2^96), using NUMOS as currency0 and the paired token as currency1. The deployer derives the actual opening price from the requested economics and total supply using the deployed currency address ordering. The capitalization is denominated in the specified paired token's minor units."
+}
