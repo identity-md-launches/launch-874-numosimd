@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {NumosIMD} from "../src/NumosIMD.sol";
 
 /// @dev A closed set of holders allows the invariant to account for every minted unit.
@@ -13,7 +14,9 @@ contract NumosIMDHandler is Test {
 
     constructor(NumosIMD token_) {
         token = token_;
-        expectedBalance[holders[0]] = 1_000_000_000 * 10 ** 18;
+        for (uint256 i; i < holders.length; ++i) {
+            expectedBalance[holders[i]] = (1_000_000_000 * 10 ** 18) / holders.length;
+        }
     }
 
     function holder(uint256 index) public view returns (address) {
@@ -54,8 +57,75 @@ contract NumosIMDHandler is Test {
             expectedAllowance[owner][spender] -= amount;
         }
     }
+
+    // Expected reverts are checked here, so fail_on_revert still catches unexpected
+    // failures. The balance/allowance ghosts must survive each rejected operation.
+    function transferAboveBalance(uint256 fromSeed, uint256 toSeed, uint256 excessSeed) public {
+        address from = holder(fromSeed);
+        uint256 balance = expectedBalance[from];
+        uint256 amount = balance + bound(excessSeed, 1, type(uint256).max - balance);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, from, balance, amount));
+        vm.prank(from);
+        token.transfer(holder(toSeed), amount);
+    }
+
+    function transferFromAboveAllowance(uint256 ownerSeed, uint256 spenderSeed, uint256 toSeed, uint256 allowanceSeed)
+        public
+    {
+        // Explicitly finite, including max - 1; no early return for infinite approvals.
+        uint256 allowed = bound(allowanceSeed, 0, type(uint256).max - 1);
+        approve(ownerSeed, spenderSeed, allowed, false);
+        address spender = holder(spenderSeed);
+        vm.expectRevert(
+            abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, spender, allowed, allowed + 1)
+        );
+        vm.prank(spender);
+        token.transferFrom(holder(ownerSeed), holder(toSeed), allowed + 1);
+    }
+
+    function transferFromAboveBalance(
+        uint256 ownerSeed,
+        uint256 spenderSeed,
+        uint256 toSeed,
+        uint256 excessSeed,
+        bool unlimited
+    ) public {
+        address owner = holder(ownerSeed);
+        uint256 balance = expectedBalance[owner];
+        uint256 amount = balance + bound(excessSeed, 1, type(uint256).max - balance);
+        approve(ownerSeed, spenderSeed, amount, unlimited);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, owner, balance, amount));
+        vm.prank(holder(spenderSeed));
+        token.transferFrom(owner, holder(toSeed), amount);
+    }
+
+    function revokeAndAttemptSpend(uint256 ownerSeed, uint256 spenderSeed, uint256 toSeed) public {
+        approve(ownerSeed, spenderSeed, 0, false);
+        address spender = holder(spenderSeed);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, spender, 0, 1));
+        vm.prank(spender);
+        token.transferFrom(holder(ownerSeed), holder(toSeed), 1);
+    }
+
+    function transferToZero(uint256 ownerSeed, uint256 spenderSeed, uint256 amountSeed, bool delegated) public {
+        address owner = holder(ownerSeed);
+        uint256 amount = bound(amountSeed, 0, expectedBalance[owner]);
+        if (delegated) {
+            approve(ownerSeed, spenderSeed, amount, false);
+            vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
+            vm.prank(holder(spenderSeed));
+            token.transferFrom(owner, address(0), amount);
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
+            vm.prank(owner);
+            token.transfer(address(0), amount);
+        }
+    }
 }
 
+/// forge-config: default.invariant.runs = 256
+/// forge-config: default.invariant.depth = 128
+/// forge-config: default.invariant.fail-on-revert = true
 contract NumosIMDInvariantTest is Test {
     uint256 private constant SUPPLY = 1_000_000_000 * 10 ** 18;
     NumosIMD private token;
@@ -64,12 +134,19 @@ contract NumosIMDInvariantTest is Test {
     function setUp() public {
         token = new NumosIMD();
         handler = new NumosIMDHandler(token);
-        token.transfer(handler.holder(0), SUPPLY);
+        for (uint256 i; i < 4; ++i) {
+            assertTrue(token.transfer(handler.holder(i), SUPPLY / 4));
+        }
 
-        bytes4[] memory selectors = new bytes4[](3);
+        bytes4[] memory selectors = new bytes4[](8);
         selectors[0] = NumosIMDHandler.transfer.selector;
         selectors[1] = NumosIMDHandler.approve.selector;
         selectors[2] = NumosIMDHandler.transferFrom.selector;
+        selectors[3] = NumosIMDHandler.transferAboveBalance.selector;
+        selectors[4] = NumosIMDHandler.transferFromAboveAllowance.selector;
+        selectors[5] = NumosIMDHandler.transferFromAboveBalance.selector;
+        selectors[6] = NumosIMDHandler.revokeAndAttemptSpend.selector;
+        selectors[7] = NumosIMDHandler.transferToZero.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -78,12 +155,15 @@ contract NumosIMDInvariantTest is Test {
         assertEq(token.totalSupply(), SUPPLY);
         assertEq(token.balanceOf(address(0)), 0);
         assertEq(token.balanceOf(address(this)), 0);
+        assertEq(token.balanceOf(address(handler)), 0);
+        assertEq(token.balanceOf(address(token)), 0);
         uint256 sum;
         for (uint256 i; i < 4; ++i) {
             address owner = handler.holder(i);
             uint256 balance = token.balanceOf(owner);
             sum += balance;
             assertEq(balance, handler.expectedBalance(owner));
+            assertEq(token.allowance(owner, address(0)), 0);
             for (uint256 j; j < 4; ++j) {
                 address spender = handler.holder(j);
                 assertEq(token.allowance(owner, spender), handler.expectedAllowance(owner, spender));
